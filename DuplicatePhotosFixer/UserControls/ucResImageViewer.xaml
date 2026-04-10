@@ -15,11 +15,10 @@
         <ItemsControl.ItemTemplate>
             <DataTemplate>
                 <!-- Each Duplicate Group -->
-                <Border Background="{DynamicResource bgrclr_whitish}"
-                        BorderBrush="{DynamicResource clr_grayborder}"
-                        BorderThickness="1"
-                        Margin="10"
-                        CornerRadius="2">
+                <Border Background="Transparent"
+                    BorderThickness="0"
+                    Margin="0"
+                    CornerRadius="0">
                     <StackPanel>
                         <!-- Group Header -->
                         <Border Background="{DynamicResource bgclr_dark}"
@@ -75,13 +74,34 @@
                                             <Style TargetType="Border">
                                                 <Setter Property="BorderBrush" Value="{DynamicResource clr_grayborder}"/>
                                                 <Style.Triggers>
-                                                    <!-- Blue border when this file is the SelectedFile in the ViewModel -->
                                                     <DataTrigger Binding="{Binding IsHighlighted}" Value="True">
-                                                        <Setter Property="BorderBrush" Value="#1E90FF"/>
+
+                                                        <!-- Main border -->
+                                                        <Setter Property="BorderBrush" Value="#7DB7FF"/>
                                                         <Setter Property="BorderThickness" Value="3"/>
+
+                                                        <Setter Property="Effect">
+                                                            <Setter.Value>
+                                                                <DropShadowEffect Color="#7DB7FF"
+                                                                  BlurRadius="12"
+                                                                  ShadowDepth="0"
+                                                                  Opacity="0.9"/>                               
+                                                            </Setter.Value>
+                                                        </Setter>
+
                                                     </DataTrigger>
                                                     <Trigger Property="IsMouseOver" Value="True">
-                                                        <Setter Property="BorderBrush" Value="{DynamicResource frg_clr_blue}"/>
+                                                        <Setter Property="BorderBrush" Value="#7DB7FF"/>
+                                                        <Setter Property="BorderThickness" Value="3"/>
+                                                        <Setter Property="Effect">
+                                                            <Setter.Value>
+                                                                <DropShadowEffect Color="#7DB7FF"
+                                                                  BlurRadius="12"
+                                                                  ShadowDepth="0"
+                                                                  Opacity="0.9"/>               
+                                                            </Setter.Value>
+                                                        </Setter>
+
                                                     </Trigger>
                                                 </Style.Triggers>
                                             </Style>
