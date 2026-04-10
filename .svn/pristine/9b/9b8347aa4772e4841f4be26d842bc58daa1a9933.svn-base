@@ -1,0 +1,1284 @@
+﻿using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Data;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows;
+using DuplicatePhotosFixer.ClassDictionary;
+using DuplicatePhotosFixer.Helpers;
+using ImageMagick;
+using DuplicatePhotosFixer.Sqlite;
+using MyLogger;
+using DuplicatePhotosFixer.HelperClasses;
+using System.Drawing;
+using static DuplicatePhotosFixer.cClientEnum;
+
+namespace DuplicatePhotosFixer.Engine.ScanModes.FileSystem
+{
+
+    class SystemScanWrapper : IScannerWrapper
+    {
+        SystemScanHelper objSystemScanHelper = null;
+        string lastFolderPath = string.Empty;
+
+        const float MINIMUM_LEVEL_CONSIDERED_FOR_DUPLICATES = 0.85f;
+        const float MINIMUM_LEVEL_CONSIDERED_FOR_DUPLICATES_IN_EXACT_MATCH = 0.989f;
+        const float MIN_VALUE_IF_NOT_MATCHED = 0.7f;
+        const int PartsSize = 4;
+        const int SQLITE_BATCH_SIZE = 1000;
+        const int nBatchSize = 1000;
+
+        uint totLength = (uint)(cGlobalSettings.ImageResize * cGlobalSettings.ImageResize); // default = 64
+        ulong maxScore = (ulong)((1.0f - MINIMUM_LEVEL_CONSIDERED_FOR_DUPLICATES) * (cGlobalSettings.ImageResize * cGlobalSettings.ImageResize));
+
+        static bool bHelperDLLFound = false;
+
+        public override bool AuthCode(string clientId, string clientSecret, string redirectUri, Callback callback)
+        {
+            throw new NotImplementedException();
+        }
+
+        public override bool Browse(out string[] SelectedPaths)
+        {
+            SelectedPaths = null;
+            try
+            {
+                SelectedPaths = HelperClasses.cSelectFilesFolders.ShowFolder_System(App.oMainReference);
+
+                if (SelectedPaths == null || SelectedPaths.Length <= 0)
+                    return false;
+            }
+            catch (Exception ex)
+            {
+                cGlobalSettings.oLogger.WriteLogException("SystemScanWrapper:: Browse: ", ex);
+            }
+            return true;
+        }
+
+        public override bool Delete(object client, List<object> list)
+        {
+            throw new NotImplementedException();
+        }
+
+        public override string FormatProgressMessage(object folder)
+        {
+            throw new NotImplementedException();
+        }
+
+        public override bool ProcessMessage(object client, object folder, object mail, ref object record, Callback callback, int PauseCounter, string directoryPath)
+        {
+            throw new NotImplementedException();
+        }
+
+        public static string GetThumbnailImage(string SourcePath, bool bCreateThumbIfNotFound = false)
+        {
+            string ThumbPath = null;
+
+            try
+            {
+                string strFileName_Thumb = string.Format("{0}.jpg", AppFunctions.CreateMD5Hash(SourcePath));
+                ThumbPath = Path.Combine(cGlobalSettings.strThumbSaveFolderPath, strFileName_Thumb);
+
+                if (File.Exists(ThumbPath))
+                {
+                    return ThumbPath;
+                }
+                else
+                {
+                    bool bNew = false;
+                    var extFound = cGlobalSettings.listFileType.Where(p => p.Key > -1 && p.Value.ImageFileExtension.IndexOf(Path.GetExtension(SourcePath), StringComparison.OrdinalIgnoreCase) >= 0);
+
+                    if (extFound != null)
+                    {
+                        bNew = extFound.FirstOrDefault().Value.IsNewLibSupportedExt;
+                    }
+
+                    if (!bNew)
+                        return null;
+
+                    if (bCreateThumbIfNotFound && SaveImageThumb(SourcePath, ref ThumbPath))
+                    {
+                        return ThumbPath;
+                    }
+                    else
+                    {
+                        ThumbPath = null;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                cGlobalSettings.oLogger.WriteLogException("csImageMagick:: GetThumbnailImage: ", ex);
+            }
+            return ThumbPath;
+        }
+
+        static System.Drawing.Size GetThumbnalSize(int actualWidth, int actualHeight, int BitMapSize)
+        {
+            System.Drawing.Size size = new System.Drawing.Size();
+            if (actualWidth == actualHeight)
+            {
+                size.Width = size.Height = BitMapSize;
+            }
+            else if (actualWidth > actualHeight)
+            {
+                int nFactor = (int)Math.Ceiling((float)actualWidth / BitMapSize);
+
+                size.Width = actualWidth / nFactor;
+                size.Height = actualHeight / nFactor;
+            }
+            else
+            {
+                int nFactor = (int)Math.Ceiling((float)actualHeight / BitMapSize);
+
+                size.Width = actualWidth / nFactor;
+                size.Height = actualHeight / nFactor;
+            }
+            return size;
+        }
+
+        public static bool SaveImageThumb(string ImageFullPath, ref string ThumbPath, int ThumbSize = 250)
+        {
+            MagickImage imm = null;
+            bool bThumbCreated = false;
+            try
+            {
+                string strFileName_Thumb = string.Format("{0}.jpg", AppFunctions.CreateMD5Hash(ImageFullPath));
+                ThumbPath = Path.Combine(cGlobalSettings.strThumbSaveFolderPath, strFileName_Thumb);
+                using (imm = new MagickImage(ImageFullPath))
+                {
+                    System.Drawing.Size thumbSize = GetThumbnalSize((int)imm.Width, (int)imm.Height, ThumbSize);
+                    imm.Thumbnail((int)(uint)thumbSize.Width, (int)(uint)thumbSize.Height);
+                    imm.Write(ThumbPath, MagickFormat.Jpg);
+                }
+
+                if (File.Exists(ThumbPath))
+                    bThumbCreated = true;
+            }
+            catch (Exception ex)
+            {
+                cGlobalSettings.oLogger.WriteLogException("SystemScanWrapper:: ConvertHeicToJPG: ", ex);
+            }
+            finally
+            {
+                if (imm != null)
+                    imm.TryDispose();
+                imm = null;
+            }
+
+            return bThumbCreated;
+        }
+
+        public void InitAll()
+        {
+            try
+            {
+
+                cGlobal.TotalDulicateFilesCount = 0;
+                cGlobal.TotalDuplicateFileSize = 0;
+
+
+                /// Init list
+                cGlobalSettings.listImageFileInfo = new ConcurrentDictionary<int, csImageFileInfo>();
+                cGlobalSettings.MediaFilePathToFileId = new ConcurrentDictionary<string, int>();
+
+
+
+            }
+            catch (Exception ex)
+            {
+                cGlobalSettings.oLogger.WriteLogException("SystemScanWrapper :: InitAll() : ", ex);
+            }
+        }
+        public override bool Scan(List<csScanPaths> inputToScan, object filters, SearchOption searchOption, ref HashSet<csImageFileInfo> list, Callback callback, int PauseCounter)
+        {
+
+            cGlobalSettings.abortNow = false;
+            try
+            {
+                InitAll();
+
+
+                OnScanStartProcess("Gettings files, please wait", 5, 0);
+
+
+                if (objSystemScanHelper == null)
+                    objSystemScanHelper = new SystemScanHelper();
+
+                List<string> searchPatterns = filters as List<string>;
+
+                /// Search for files and add in list
+                bool bAddingFiles = objSystemScanHelper.StartScan(inputToScan, searchPatterns, searchOption, ref list, callback, PauseCounter, OnScanProgressProcess);
+
+                /// Adding files complete.
+                /// Group by files size and start computing there hash values.
+                /// 
+
+                if (list.Count <= 0)
+                    return true;
+
+
+            }
+            catch (Exception ex)
+            {
+                cGlobalSettings.oLogger.WriteLogException("SystemScanWrapper:: Scan: ", ex);
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Implementation of ReadAllMessages for image duplicate detection
+        /// Following the pattern from ReadAllMessages for file scanning
+        /// </summary>
+        public override bool ReadAllMessages(
+            object client,
+            object folder,
+            ref HashSet<csImageFileInfo> imageRecordsData,
+            Callback callback,
+            int PauseCounter,
+            string directoryPath)
+        {
+            var parallelOptions = new ParallelOptions
+            {
+                MaxDegreeOfParallelism = AppFunctions.GetMaxDegreeOfParallelism(),
+            };
+
+            try
+            {
+                bool isExactMatch = !cGlobalSettings.isSimilarMatchChecked;
+
+#if !SQLITE_NEEDED
+                if (cGlobalSettings.sqliteLogger == null)
+                {
+                    cGlobalSettings.sqliteLogger = new cSqliteLogger();
+                    cGlobalSettings.sqliteLogger.InitDB();
+                }
+
+                //if (eFuncRetVal.SUCCESS != cGlobalSettings.sqliteLogger.FillTempTableWithScannedPath(cGlobalSettings.listImageFileInfo.Select(p => p.Key)))
+                //{
+                //    cGlobalSettings.oLogger.WriteLogVerbose("Not able to insert temp data in a table.");
+                //    return false;
+                //}
+
+                cGlobalSettings.sqliteLogger.LoadSqliteToDictionary(false);
+#endif
+
+                // Filter images that need hash calculation
+                var imagesToProcess = cGlobalSettings.listImageFileInfo.Where(x =>
+                {
+                    if (cGlobalSettings.CurrentScanMode == eScanMode.GoogleDrive ||
+                        cGlobalSettings.CurrentScanMode == eScanMode.Dropbox ||
+                        cGlobalSettings.CurrentScanMode == eScanMode.BoxCloud ||
+                        cGlobalSettings.CurrentScanMode == eScanMode.AmazonS3)
+                    {
+                        if (x.Value.ThumbnailPath == null)
+                            return false;
+                    }
+
+                    if (x.Value.bHashFoundInDB)
+                        return false;
+
+                    if (isExactMatch)
+                    {
+                        if (x.Value.calcHashForExactMatch)
+                            return true;
+                        else
+                            return false;
+                    }
+                    return true;
+                }).ToDictionary(x => x.Key, x => x.Value);
+
+                int nTotalFilesCount = imagesToProcess.Count;
+                int nFilesProcessed = 0;
+                int nCorruptImagesCount = 0;
+                int GroupNumber = 0;
+                int nTotalDupsFound = 0;
+
+                List<csImageFileInfo> newHashRecordsData = new List<csImageFileInfo>();
+                List<csImageFileInfo> modifiedHashRecordsData = new List<csImageFileInfo>();
+                List<csImageFileInfo> duplicateHashRecordsData = new List<csImageFileInfo>();
+
+                string strSearchingForDuplicates = cResourceManager.LoadString("DPF_PROCESSOR_PROGRESS_SEARCHING_DUPLICATE_TEXT");
+
+                // Split into batches
+                var groupedBatches = imagesToProcess.Split(SQLITE_BATCH_SIZE);
+
+                // PHASE 1: Calculate hashes for all images
+                foreach (var batch in groupedBatches)
+                {
+                    cGlobalSettings.oManualReset.WaitOne();
+                    if (cGlobalSettings.abortNow)
+                    {
+                        OnScanCompletedProcess("Scan aborted.", "", true, 100);
+                        return true;
+                    }
+
+                    // Process batch in parallel
+                    Parallel.ForEach(batch, parallelOptions, x =>
+                    {
+                        cGlobalSettings.oManualReset.WaitOne();
+                        if (cGlobalSettings.abortNow)
+                        {
+                            OnScanCompletedProcess("Scan aborted", "", true, 100);
+                            return;
+                        }
+
+                        Interlocked.Increment(ref nFilesProcessed);
+
+                        // Hash already calculated
+                        if (x.Value.bHashFoundInDB && !x.Value.bFileModified)
+                            return;
+
+                        try
+                        {
+                            // Validate key before calling GetImageHash
+                            if (x.Key < 0)
+                            {
+                                cGlobalSettings.oLogger?.WriteLogVerbose($"Skipping image with invalid key {x.Key}: {x.Value.filePath}");
+                                return;
+                            }
+
+                            byte[] bools = null;
+                            List<byte[]> arrOrientations = new List<byte[]>();
+                            bools = ImageProcessor.GetImageHash(x.Key, x.Value.filePath, PartsSize, PartsSize, ref arrOrientations);
+
+                            if (bools == null)
+                            {
+                                Interlocked.Increment(ref nCorruptImagesCount);
+                                cGlobalSettings.oLogger?.WriteLogVerbose($"Corrupt image detected: {x.Value.filePath}");
+                                return;
+                            }
+
+                            // Convert bool array to byte array
+                            Func<byte[]> __getimagehash = () =>
+                            {
+                                int bytes = (bools.Length + 7) / 8;
+                                byte[] arr = new byte[bytes];
+                                int bitIndex = 0, byteIndex = 0;
+                                for (int i = 0; i < bools.Length; i++)
+                                {
+                                    if (bools[i] == 1)
+                                    {
+                                        arr[byteIndex] |= (byte)(1 << (7 - bitIndex));
+                                    }
+                                    bitIndex++;
+                                    if (bitIndex == 8)
+                                    {
+                                        bitIndex = 0;
+                                        byteIndex++;
+                                    }
+                                }
+                                return arr;
+                            };
+
+                            if (cGlobalSettings.listImageFileInfo[x.Key].byteHash == null)
+                            {
+                                cGlobalSettings.listImageFileInfo[x.Key].byteHash = __getimagehash();
+                                cGlobalSettings.oLogger?.WriteLogVerbose($"Generated byteHash for key {x.Key}: {x.Value.filePath}");
+
+#if ROTATE_FLIPPED_CHECK
+                        for (int i = 0; i < arrOrientations.Count; i++)
+                        {
+                            bools = arrOrientations[i];
+                            arrOrientations[i] = __getimagehash();
+                        }
+                        cGlobalSettings.listImageFileInfo[x.Key].byteHashArr = arrOrientations;
+#endif
+                            }
+
+                            //// Add to appropriate list
+                            //if (x.Value.bModified)
+                            //{
+                            //    modifiedHashRecordsData.Add(x.Value);
+                            //}
+                            //else
+                            //{
+                            //    newHashRecordsData.Add(x.Value);
+                            //}
+                        }
+                        catch (Exception ex)
+                        {
+                            cGlobalSettings.oLogger?.WriteLogException($"ReadAllMessages - Hash Calculation for {x.Value.filePath}", ex);
+                        }
+
+                        // Progress reporting
+                        if (nFilesProcessed % 125 == 0)
+                        {
+                            int percentage = (nFilesProcessed * 100) / nTotalFilesCount;
+                            OnScanProgressProcess(x.Value.filePath, percentage, nTotalFilesCount, nFilesProcessed, nTotalDupsFound);
+                        }
+                    });
+
+                    // Batch insert new records
+                    if (newHashRecordsData.Count >= nBatchSize)
+                    {
+ //                       cGlobalSettings.sqliteLogger.InsertNewRecordsToDB(newHashRecordsData);
+                        newHashRecordsData.Clear();
+                    }
+
+                    // Batch update modified records
+                    if (modifiedHashRecordsData.Count >= nBatchSize)
+                    {
+//                        cGlobalSettings.sqliteLogger.UpdateRecordsToDB(modifiedHashRecordsData);
+                        modifiedHashRecordsData.Clear();
+                    }
+
+                    // Convert byte arrays to long arrays for this batch
+                    cGlobalSettings.oManualReset.WaitOne();
+                    if (cGlobalSettings.abortNow)
+                    {
+                        OnScanCompletedProcess("Scan aborted", "", true, 100);
+                        return true;
+                    }
+
+                    // Filter out invalid keys before converting
+                    var validKeys = batch.Where(x => x.Key >= 0 && x.Value.byteHash != null).Select(x => x.Key).ToList();
+                    cGlobalSettings.oLogger?.WriteLogVerbose($"Converting {validKeys.Count} valid byte hashes to long arrays...");
+
+                    if (validKeys.Count > 0)
+                    {
+                        ImageProcessor.ConvertByteArrayToLongArrayForBunch(validKeys);
+                    }
+
+                    // Verify conversion worked
+                    int hashesConverted = batch.Count(x => x.Value.hash != null);
+                    cGlobalSettings.oLogger?.WriteLogVerbose($"After conversion: {hashesConverted} images have long hash arrays");
+                }
+
+                // Insert remaining hash records
+                if (newHashRecordsData.Count > 0)
+                {
+  //                  cGlobalSettings.sqliteLogger.InsertNewRecordsToDB(newHashRecordsData);
+                    newHashRecordsData.Clear();
+                }
+
+                if (modifiedHashRecordsData.Count > 0)
+                {
+ //                   cGlobalSettings.sqliteLogger.UpdateRecordsToDB(modifiedHashRecordsData);
+                    modifiedHashRecordsData.Clear();
+                }
+
+                // PHASE 2: Detect duplicates based on match type
+                nFilesProcessed = 0;
+
+                cGlobalSettings.oLogger?.WriteLogVerbose($"Starting duplicate detection phase. isExactMatch: {isExactMatch}");
+                cGlobalSettings.oLogger?.WriteLogVerbose($"Total images with byteHash: {cGlobalSettings.listImageFileInfo.Count(x => x.Value.byteHash != null)}");
+                cGlobalSettings.oLogger?.WriteLogVerbose($"Total images with hash (long array): {cGlobalSettings.listImageFileInfo.Count(x => x.Value.hash != null && x.Value.hash.Length > 0)}");
+
+                if (isExactMatch)
+                {
+                    // Exact match: Use hash array comparison with 0.989 threshold
+                    cGlobalSettings.oLogger?.WriteLogVerbose("Running exact match duplicate detection...");
+                    DetectExactDuplicates(ref duplicateHashRecordsData, ref nFilesProcessed, ref nTotalDupsFound, ref GroupNumber, nTotalFilesCount);
+                }
+                else
+                {
+                    // Similar match: Use threshold 0.85
+                    cGlobalSettings.oLogger?.WriteLogVerbose("Running similar match duplicate detection...");
+                    DetectSimilarDuplicates(ref duplicateHashRecordsData, ref nFilesProcessed, ref nTotalDupsFound, ref GroupNumber, nTotalFilesCount);
+                }
+
+                cGlobalSettings.oLogger?.WriteLogVerbose($"Duplicate detection completed. Groups found: {cGlobalSettings.nTotalGroups}, Total duplicates: {nTotalDupsFound}");
+
+                // Insert remaining duplicate records
+                if (duplicateHashRecordsData.Count > 0)
+                {
+  //                  cGlobalSettings.sqliteLogger.dupFileLogs.InsertMultipleNewRecordsToDBDups(duplicateHashRecordsData, true);
+                    duplicateHashRecordsData.Clear();
+                }
+
+                cGlobalSettings.oLogger.WriteLogVerbose("\tTotal corrupt images count:{0}", nCorruptImagesCount, false, true);
+
+                OnScanCompletedProcess("Scan completed", "", true, 100);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                cGlobalSettings.oLogger.WriteLogException("ReadAllMessages: ", ex);
+            }
+
+            return true;
+        }
+
+        private void DetectExactDuplicates(
+       ref List<csImageFileInfo> duplicateHashRecordsData,
+       ref int nFilesProcessed,
+       ref int nTotalDupsFound,
+       ref int GroupNumber,
+       int nTotalFilesCount)
+        {
+            var parallelOptions = new ParallelOptions
+            {
+                MaxDegreeOfParallelism = AppFunctions.GetMaxDegreeOfParallelism(),
+            };
+
+            try
+            {
+                cGlobalSettings.oLogger?.WriteLogVerbose("=== DetectExactDuplicates START ===");
+
+                // Use byteHash if available, otherwise use hash
+                var imagesForGrouping = cGlobalSettings.listImageFileInfo
+                    .Where(x => x.Value.byteHash != null || (x.Value.hash != null && x.Value.hash.Length > 0))
+                    .ToList();
+
+                cGlobalSettings.oLogger?.WriteLogVerbose($"Images available for exact matching: {imagesForGrouping.Count}");
+
+                // Group by byteHash (exact match)
+                var dupsGroups = imagesForGrouping
+                    .Where(x => x.Value.byteHash != null)
+                    .GroupBy(x => x.Value.byteHash, new ByteArrayComparer())
+                    .Where(g => g.Count() > 1)
+                    .ToList();
+
+                cGlobalSettings.oLogger?.WriteLogVerbose($"Found {dupsGroups.Count} duplicate groups in exact match mode");
+
+                if (dupsGroups.Count == 0)
+                {
+                    cGlobalSettings.oLogger?.WriteLogVerbose("No exact duplicates found. Checking if any images have matching hashes...");
+
+                    // Debug: Check if we have ANY images with the same hash
+                    var hashGroups = imagesForGrouping
+                        .Where(x => x.Value.hash != null && x.Value.hash.Length > 0)
+                        .GroupBy(x => string.Join(",", x.Value.hash))
+                        .Where(g => g.Count() > 1)
+                        .ToList();
+
+                    cGlobalSettings.oLogger?.WriteLogVerbose($"Found {hashGroups.Count} groups with matching hash arrays");
+                    return;
+                }
+
+                string strCurrentFile = "";
+
+                foreach (var dupsGroup in dupsGroups)
+                {
+                    cGlobalSettings.oManualReset.WaitOne();
+                    if (cGlobalSettings.abortNow)
+                    {
+                        OnScanCompletedProcess("Scan aborted", "", true, 100);
+                        return;
+                    }
+
+                    int nDupsCount = dupsGroup.Count();
+                    int groupNum = Interlocked.Increment(ref GroupNumber);
+                    Interlocked.Add(ref nTotalDupsFound, nDupsCount);
+
+                    cGlobalSettings.oLogger?.WriteLogVerbose($"Processing duplicate group {groupNum} with {nDupsCount} images:");
+
+                    foreach (var item in dupsGroup)
+                    {
+                        item.Value.GroupNumber = GroupNumber;
+                        item.Value.GroupItemCount = nDupsCount;
+                        strCurrentFile = item.Value.filePath;
+
+                        cGlobalSettings.oLogger?.WriteLogVerbose($"  - {item.Value.filePath}");
+
+                        duplicateHashRecordsData.Add(item.Value);
+                    }
+
+                    if (duplicateHashRecordsData.Count >= nBatchSize)
+                    {
+                        cGlobalSettings.oLogger?.WriteLogVerbose($"Inserting batch of {duplicateHashRecordsData.Count} duplicates to DB");
+                        duplicateHashRecordsData.Clear();
+                    }
+
+                    cGlobalSettings.nTotalGroups += 1;
+                    cGlobal.TotalDulicateFilesCount += nDupsCount;
+                    cGlobal.TotalDuplicateFileSize += dupsGroup.Select(p => p.Value.fileSize).Sum();
+
+                    nFilesProcessed += nDupsCount;
+
+                    if (nFilesProcessed % 125 == 0)
+                    {
+                        int percentage = (nFilesProcessed * 100) / nTotalFilesCount;
+                        OnScanProgressProcess(strCurrentFile, percentage, nTotalFilesCount, nFilesProcessed, nTotalDupsFound);
+                    }
+                }
+
+                cGlobalSettings.oLogger?.WriteLogVerbose($"=== DetectExactDuplicates END - Total groups: {cGlobalSettings.nTotalGroups}, Total dups: {nTotalDupsFound} ===");
+            }
+            catch (Exception ex)
+            {
+                cGlobalSettings.oLogger.WriteLogException("DetectExactDuplicates", ex);
+            }
+        }
+
+        private void DetectSimilarDuplicates(
+            ref List<csImageFileInfo> duplicateHashRecordsData,
+            ref int nFilesProcessed,
+            ref int nTotalDupsFound,
+            ref int GroupNumber,
+            int nTotalFilesCount)
+        {
+            try
+            {
+                cGlobalSettings.oLogger?.WriteLogVerbose("=== DetectSimilarDuplicates START ===");
+
+                // For similar match, we NEED the hash (long array)
+                var imagesWithHashes = cGlobalSettings.listImageFileInfo
+                    .Where(x => x.Value.hash != null && x.Value.hash.Length > 0)
+                    .Select(x => new { Key = x.Key, Value = x.Value })
+                    .ToList();
+
+                cGlobalSettings.oLogger?.WriteLogVerbose($"Processing {imagesWithHashes.Count} images for similar duplicate detection");
+
+                if (imagesWithHashes.Count == 0)
+                {
+                    cGlobalSettings.oLogger?.WriteLogVerbose("ERROR: No images with hash arrays found! Cannot detect similar duplicates.");
+                    cGlobalSettings.oLogger?.WriteLogVerbose($"Images with byteHash: {cGlobalSettings.listImageFileInfo.Count(x => x.Value.byteHash != null)}");
+                    return;
+                }
+
+                float similarityThreshold = MINIMUM_LEVEL_CONSIDERED_FOR_DUPLICATES; // 0.85
+
+                // Track which images have been grouped
+                HashSet<int> processedKeys = new HashSet<int>();
+
+                // Compare each image with every other image
+                for (int i = 0; i < imagesWithHashes.Count; i++)
+                {
+                    cGlobalSettings.oManualReset.WaitOne();
+                    if (cGlobalSettings.abortNow)
+                    {
+                        OnScanCompletedProcess("Scan aborted", "", true, 100);
+                        return;
+                    }
+
+                    var currentImage = imagesWithHashes[i];
+
+                    // Skip if already assigned to a group
+                    if (processedKeys.Contains(currentImage.Key))
+                        continue;
+
+                    List<csImageFileInfo> similarImages = new List<csImageFileInfo>();
+                    similarImages.Add(currentImage.Value);
+                    processedKeys.Add(currentImage.Key);
+
+                    // Compare with remaining images
+                    for (int j = i + 1; j < imagesWithHashes.Count; j++)
+                    {
+                        var compareImage = imagesWithHashes[j];
+
+                        // Skip if already assigned
+                        if (processedKeys.Contains(compareImage.Key))
+                            continue;
+
+                        // Calculate similarity using long hash arrays
+                        float similarity = CalculateHashSimilarity(currentImage.Value.hash, compareImage.Value.hash);
+
+                        if (similarity >= similarityThreshold)
+                        {
+                            similarImages.Add(compareImage.Value);
+                            processedKeys.Add(compareImage.Key);
+
+                            cGlobalSettings.oLogger?.WriteLogVerbose($"Found similar image: {compareImage.Value.filePath} matches {currentImage.Value.filePath} (similarity: {similarity:F3})");
+                        }
+                    }
+
+                    nFilesProcessed++;
+
+                    // If similar images found, create group
+                    if (similarImages.Count > 1)
+                    {
+                        int groupNum = Interlocked.Increment(ref GroupNumber);
+                        Interlocked.Add(ref nTotalDupsFound, similarImages.Count);
+
+                        cGlobalSettings.oLogger?.WriteLogVerbose($"Created duplicate group {groupNum} with {similarImages.Count} images");
+
+                        string strCurrentFile = "";
+                        foreach (var item in similarImages)
+                        {
+                            item.GroupNumber = GroupNumber;
+                            item.GroupItemCount = similarImages.Count;
+                            strCurrentFile = item.filePath;
+
+                            duplicateHashRecordsData.Add(item);
+                        }
+
+                        if (duplicateHashRecordsData.Count >= nBatchSize)
+                        {
+                            duplicateHashRecordsData.Clear();
+                        }
+
+                        cGlobalSettings.nTotalGroups += 1;
+                        cGlobal.TotalDulicateFilesCount += similarImages.Count;
+                        cGlobal.TotalDuplicateFileSize += similarImages.Select(p => p.fileSize).Sum();
+
+                        if (nFilesProcessed % 25 == 0)
+                        {
+                            int percentage = (nFilesProcessed * 100) / imagesWithHashes.Count;
+                            OnScanProgressProcess(strCurrentFile, percentage, imagesWithHashes.Count, nFilesProcessed, nTotalDupsFound);
+                        }
+                    }
+                }
+
+                cGlobalSettings.oLogger?.WriteLogVerbose($"=== DetectSimilarDuplicates END - Total groups: {cGlobalSettings.nTotalGroups}, Total dups: {nTotalDupsFound} ===");
+            }
+            catch (Exception ex)
+            {
+                cGlobalSettings.oLogger.WriteLogException("DetectSimilarDuplicates", ex);
+            }
+        }
+
+        /// <summary>
+        /// Calculate similarity between two long hash arrays (perceptual hash)
+        /// Returns value between 0.0 and 1.0
+        /// </summary>
+        private float CalculateHashSimilarity(ulong[] hash1, ulong[] hash2)
+        {
+            if (hash1 == null || hash2 == null || hash1.Length != hash2.Length)
+                return 0.0f;
+
+            ulong totalDifference = 0;
+
+            for (int i = 0; i < hash1.Length; i++)
+            {
+                ulong xor = hash1[i] ^ hash2[i];
+
+                // Count differing bits
+                while (xor != 0)
+                {
+                    totalDifference++;
+                    xor &= (xor - 1); // Clear least significant bit
+                }
+            }
+
+            // Calculate similarity as 1 - (differences / total possible bits)
+            uint totalBits = totLength; // cGlobalSettings.ImageResize * cGlobalSettings.ImageResize
+            float similarity = 1.0f - ((float)totalDifference / totalBits);
+
+            return similarity;
+        }
+
+        /// <summary>
+        /// Helper class for comparing byte arrays (exact match)
+        /// </summary>
+        public class ByteArrayComparer : IEqualityComparer<byte[]>
+        {
+            public bool Equals(byte[] left, byte[] right)
+            {
+                if (left == null || right == null)
+                    return left == right;
+
+                if (left.Length != right.Length)
+                    return false;
+
+                for (int i = 0; i < left.Length; i++)
+                {
+                    if (left[i] != right[i])
+                        return false;
+                }
+                return true;
+            }
+
+            public int GetHashCode(byte[] key)
+            {
+                if (key == null)
+                    return 0;
+
+                int hash = 17;
+                foreach (byte b in key)
+                {
+                    hash = hash * 31 + b;
+                }
+                return hash;
+            }
+        }
+
+
+
+#if PreviousCode
+    //class SystemScanWrapper : IScannerWrapper
+    //{
+    //    SystemScanHelper objSystemScanHelper = null;
+    //    string lastFolderPath = string.Empty;
+    //    int FolderIndex = 0;
+    //    public override bool AuthCode(string clientId, string clientSecret, string redirectUri, Callback callback)
+    //    {
+    //        throw new NotImplementedException();
+    //    }
+
+    //    public override bool Browse(out string[] SelectedPaths)
+    //    {
+    //        SelectedPaths = null;
+    //        try
+    //        {
+    //            SelectedPaths = HelperClasses.cSelectFilesFolders.ShowFolder_System(App.oMainReference);
+
+    //            if (SelectedPaths == null || SelectedPaths.Length <= 0)
+    //                return false;
+    //        }
+    //        catch (Exception ex)
+    //        {
+    //            cGlobalSettings.oLogger.WriteLogException("SystemScanWrapper:: Browse: ", ex);
+    //        }
+    //        return true;
+
+    //    }
+
+
+
+    //    public override bool Delete(object client, List<object> list)
+    //    {
+    //        throw new NotImplementedException();
+    //    }
+
+    //    public override string FormatProgressMessage(object folder)
+    //    {
+    //        throw new NotImplementedException();
+    //    }
+
+    //    public override bool ProcessMessage(object client, object folder, object mail, ref object record, Callback callback, int PauseCounter, string directoryPath)
+    //    {
+    //        throw new NotImplementedException();
+    //    }
+
+    //    public static string GetThumbnailImage(string SourcePath, bool bCreateThumbIfNotFound = false)
+    //    {
+    //        //return null;
+    //        string ThumbPath = null;
+
+    //        try
+    //        {
+    //            string strFileName_Thumb = string.Format("{0}.jpg", AppFunctions.CreateMD5Hash(SourcePath));
+    //            ThumbPath = Path.Combine(cGlobalSettings.strThumbSaveFolderPath, strFileName_Thumb);
+
+    //            if (File.Exists(ThumbPath))
+    //            {
+    //                return ThumbPath;
+    //            }
+    //            else
+    //            {
+    //                bool bNew = false;
+    //                var extFound = cGlobalSettings.listFileType.Where(p => p.Key > -1 && p.Value.ImageFileExtension.IndexOf(Path.GetExtension(SourcePath), StringComparison.OrdinalIgnoreCase) >= 0);
+
+    //                if (extFound != null)
+    //                {
+    //                    bNew = extFound.FirstOrDefault().Value.IsNewLibSupportedExt;
+    //                }
+
+    //                if (!bNew)
+    //                    return null;
+
+    //                if (bCreateThumbIfNotFound && SaveImageThumb(SourcePath, ref ThumbPath))
+    //                {
+    //                    return ThumbPath;
+    //                }
+    //                else
+    //                {
+    //                    ThumbPath = null;
+    //                }
+    //            }
+    //        }
+    //        catch (Exception ex)
+    //        {
+    //            cGlobalSettings.oLogger.WriteLogException("csImageMagick:: GetThumbnailImage: ", ex);
+    //        }
+    //        return ThumbPath;
+    //    }
+
+    //    static Size GetThumbnalSize(int actualWidth, int actualHeight, int BitMapSize)
+    //    {
+    //        Size size = new Size();
+    //        if (actualWidth == actualHeight)
+    //        {
+    //            size.Width = size.Height = BitMapSize;
+    //        }
+    //        else if (actualWidth > actualHeight)
+    //        {
+    //            int nFactor = (int)Math.Ceiling((float)actualWidth / BitMapSize);
+
+    //            size.Width = actualWidth / nFactor;
+    //            size.Height = actualHeight / nFactor;
+    //        }
+    //        else
+    //        {
+    //            int nFactor = (int)Math.Ceiling((float)actualHeight / BitMapSize);
+
+    //            size.Width = actualWidth / nFactor;
+    //            size.Height = actualHeight / nFactor;
+    //        }
+    //        return size;
+    //    }
+    //    public static bool SaveImageThumb(string ImageFullPath, ref string ThumbPath, int ThumbSize = 250)
+    //    {
+    //        MagickImage imm = null;
+    //        bool bThumbCreated = false;
+    //        try
+    //        {
+    //            string strFileName_Thumb = string.Format("{0}.jpg", AppFunctions.CreateMD5Hash(ImageFullPath));
+    //            ThumbPath = Path.Combine(cGlobalSettings.strThumbSaveFolderPath, strFileName_Thumb);
+    //            using (imm = new MagickImage(ImageFullPath))
+    //            {
+    //                /// Write image thumbnail with JPG format
+    //                /// 
+    //                Size thumbSize = GetThumbnalSize((int)imm.Width, (int)imm.Height, ThumbSize);
+    //                imm.Thumbnail((int)(uint)thumbSize.Width, (int)(uint)thumbSize.Height);
+    //                imm.Write(ThumbPath, MagickFormat.Jpg);
+    //            }
+
+    //            if (File.Exists(ThumbPath))
+    //                bThumbCreated = true;
+    //        }
+    //        catch (Exception ex)
+    //        {
+    //            cGlobalSettings.oLogger.WriteLogException("SystemScanWrapper:: ConvertHeicToJPG: ", ex);
+    //        }
+    //        finally
+    //        {
+    //            if (imm != null)
+    //                imm.TryDispose();
+    //            imm = null;
+    //        }
+
+    //        return bThumbCreated;
+    //    }
+
+    //    public override bool ReadAllMessages(object client, object folder, ref List<csImageFileInfo> fileRecordsData0, Callback callback, int PauseCounter, string directoryPath)
+    //    {
+    //        CancellationTokenSource cts = null;
+    //        //            try
+    //        //            {
+
+    //        //#if !SQLITE_NEEDED
+
+    //        //                //if (cGlobalSettings.sqliteLogger == null)
+    //        //                //{
+    //        //                //    cGlobalSettings.sqliteLogger = new cSqliteLogger();
+    //        //                //    cGlobalSettings.sqliteLogger.InitDB();
+    //        //                //}
+
+    //        //                //if (eFuncRetVal.SUCCESS != cGlobalSettings.sqliteLogger.FillTempTableWithScannedPath(cGlobalSettings.MediaFilePathToFileId.Select(p => p.Key)))
+    //        //                //{
+    //        //                //    cGlobalSettings.oLogger.WriteLogVerbose("Not able to insert temp data in a table.");
+    //        //                //    return false;
+    //        //                //}
+
+    //        //                //cGlobalSettings.sqliteLogger.LoadSqliteToDictionary(false);
+    //        //#endif
+
+    //        //var groupSize = cGlobalSettings.dictFileRecordsData.GroupBy(p => p.Value.FileSize); // fileRecordsData.GroupBy(p => p.FileSize);
+
+    //        var hashGroups = cGlobalSettings.listImageFileInfo.GroupBy(x => AppFunctions.CreateMD5Hash(x.Value.fileName));
+
+
+    //        // var groupbySearchOptions = ValidateSearchOptions(cGlobalSettings.listImageFileInfo);
+    //        //Dictionary<string, List<FileRecord>> dictDupsData = new Dictionary<string, List<FileRecord>>();
+
+    //        int nTotalFilesCount = cGlobalSettings.listImageFileInfo.Count;
+    //        int GroupNumber = 0;
+    //        int nFilesProcessed = 0;
+    //        int nTotalDupsFound = 0;
+
+
+    //        List<csImageFileInfo> newFileRecordsData = new List<csImageFileInfo>();
+    //        List<FileRecord> modifiedFileRecordsData = new List<FileRecord>();
+    //        cts = new CancellationTokenSource();
+
+
+
+    //        foreach (var group in hashGroups)
+    //        {
+    //            // Show the data till the scanning is stopped
+    //            cGlobalSettings.oManualReset.WaitOne();
+    //            if (cGlobalSettings.abortNow)
+    //            {
+    //                OnScanCompletedProcess("Scan aborted.", "", true, 100);
+    //                break;
+    //            }
+
+    //            int nItems = group.Count();
+
+    //            if (nItems == 1)
+    //            {
+    //                nFilesProcessed += 1;
+    //                continue;
+    //            }
+
+    //            group.AsParallel()
+    //                .WithDegreeOfParallelism(3)
+    //                .WithCancellation(cts.Token)
+    //                .ForAll(p =>
+    //                //group.All(p =>
+    //                {
+    //                    cGlobalSettings.oManualReset.WaitOne();
+    //                    if (cGlobalSettings.abortNow)
+    //                    {
+    //                        OnScanCompletedProcess("Scan aborted", "", true, 100);
+
+    //                        return;
+    //                    }
+
+    //                    nFilesProcessed += 1;
+
+    //                        /// Hash already calculated
+    //                      //  if (p.Value.bHashFoundInDB && !p.Value.bModified)
+    //                        return;
+
+    //                    //p.Value.FileHash = AppFunctions.GetMD5(p.Value.FilePath);
+
+    //                        // generate thumnail cache, if file Updated then get new thumb also.
+    //                         string ThumbPath = GetThumbnailImage(p.Value.filePath, false);
+    //                    p.Value.ThumbnailPath = ThumbPath;
+
+    //                    //if (p.Value.bModified)
+    //                    {
+    //                        //modifiedFileRecordsData.Add(p.Value);
+    //                    }
+    //                    //else
+    //                    {
+    //                        newFileRecordsData.Add(p.Value);
+    //                    }
+
+    //                    if (nFilesProcessed % 125 == 0)
+    //                    {
+    //                        int percentage1 = (nFilesProcessed * 100) / nTotalFilesCount;
+    //                        OnScanProgressProcess(p.Value.filePath, percentage1, nTotalFilesCount, nFilesProcessed, nTotalDupsFound);
+    //                    }
+    //                        //return;
+    //                    });
+
+
+    //            //if (newFileRecordsData.Count >= nBatchSize)
+    //            //{
+    //            //    /// Insert  in DB 
+    //            //    /// 
+    //            //    cGlobalSettings.sqliteLogger.InsertNewRecordsToDB(newFileRecordsData);
+
+    //            //    newFileRecordsData.Clear();
+    //            //}
+
+    //            //if (modifiedFileRecordsData.Count >= nBatchSize)
+    //            //{
+    //            //    /// Update data in DB
+    //            //    /// 
+    //            //    //cGlobalSettings.sqliteLogger.InsertNewRecordsToDB(modifiedFileRecordsData);
+    //            //    cGlobalSettings.sqliteLogger.UpdateRecordsToDB(modifiedFileRecordsData);
+
+    //            //    modifiedFileRecordsData.Clear();
+    //            //}
+
+
+    //            // Show the data till the scanning is stopped
+    //            cGlobalSettings.oManualReset.WaitOne();
+    //            if (cGlobalSettings.abortNow)
+    //            {
+    //                OnScanCompletedProcess("Scan aborted", "", true, 100);
+    //                //break;
+    //                //return true;
+    //            }
+
+    //            //if (RegistryVariables.SameContent)
+    //            //{
+    //            //    /// Group files on bases of MD5 and assign Group number
+    //            //    var dupsGroups = group.GroupBy(p => p.Value.hash).Where(p => !string.IsNullOrEmpty(p.Key));
+
+    //            //    string strCurrentFile = "";
+    //            //    foreach (var dupsGroup in dupsGroups)
+    //            //    {
+    //            //        int nDupsCount = dupsGroup.Count();
+
+    //            //        if (nDupsCount == 1)
+    //            //            continue;
+
+    //            //        GroupNumber += 1;
+    //            //        nTotalDupsFound += nDupsCount;
+    //            //        dupsGroup.All(p =>
+    //            //        {
+    //            //            p.Value.GroupNumber = GroupNumber;
+    //            //            strCurrentFile = p.Value.FilePath;
+    //            //            return true;
+    //            //        });
+
+    //            //        //dictDupsData.Add(dupsGroup.Key, dupsGroup.ToList<FileRecord>());
+    //            //        cGlobalSettings.TotalDuplicateGroups += 1;
+    //            //        cGlobal.TotalDulicateFilesCount += nDupsCount;
+    //            //        cGlobal.TotalDuplicateFileSize += dupsGroup.Select(p => p.Value.FileSize).Sum();
+    //            //    }
+    //            //    if (nFilesProcessed % 125 == 0)
+    //            //    {
+    //            //        int percentage = (nFilesProcessed * 100) / nTotalFilesCount;
+    //            //        OnScanProgressProcess(strCurrentFile, percentage, nTotalFilesCount, nFilesProcessed, nTotalDupsFound);
+    //            //    }
+    //            //}
+    //            else
+    //            {
+
+    //                string strCurrentFile = "";
+    //                int nDupsCount = group.Count();
+    //                GroupNumber += 1;
+    //                nTotalDupsFound += nDupsCount;
+
+    //                group.All(p =>
+    //                {
+    //                    p.Value.groupNumber = GroupNumber;
+    //                    strCurrentFile = p.Value.filePath;
+    //                    return true;
+    //                });
+
+    //                cGlobalSettings.TotalDuplicateGroups += 1;
+    //                cGlobal.TotalDulicateFilesCount += nDupsCount;
+    //                cGlobal.TotalDuplicateFileSize += group.Select(p => p.Value.fileSize).Sum();
+
+    //                if (nFilesProcessed % 125 == 0)
+    //                {
+    //                    int percentage = (nFilesProcessed * 100) / nTotalFilesCount;
+    //                    OnScanProgressProcess(strCurrentFile, percentage, nTotalFilesCount, nFilesProcessed, nTotalDupsFound);
+    //                }
+    //            }
+    //        }
+
+    //        if (newFileRecordsData.Count > 0)
+    //        {
+    //            /// Insert  in DB 
+    //            /// 
+    //            //  cGlobalSettings.sqliteLogger.InsertNewRecordsToDB(newFileRecordsData);
+
+    //            newFileRecordsData.Clear();
+    //        }
+
+    //        if (modifiedFileRecordsData.Count > 0)
+    //        {
+    //            /// Update data in DB
+    //            /// 
+    //            //  cGlobalSettings.sqliteLogger.UpdateRecordsToDB(modifiedFileRecordsData);
+
+    //            modifiedFileRecordsData.Clear();
+    //        }
+
+    //        //  cGlobalSettings.dictDuplicateData = dictDupsData;
+    //        OnScanCompletedProcess("Scan completed", "", true, 100);
+    //        return true;
+    //    }
+    //        //catch (Exception ex)
+    //        //{
+    //        //    cGlobalSettings.oLogger.WriteLogException("SystemScanWrapper:: ReadAllMessages: ", ex);
+    //        //}
+
+    //        //return true;
+
+
+
+
+
+    //    public override bool Scan(List<csScanPaths> inputToScan, object filters, SearchOption searchOption, ref List<csImageFileInfo> list, Callback callback, int PauseCounter)
+    //    {
+    //        OnScanStartProcess("Gettings files, please wait", 5, 0);
+
+    //        if (objSystemScanHelper == null)
+    //            objSystemScanHelper = new SystemScanHelper();
+
+    //        List<string> searchPatterns = filters as List<string>;
+
+    //        /// Init list
+    //        /// 
+    //        cGlobalSettings.listImageFileInfo = new ConcurrentDictionary<int, csImageFileInfo>();
+    //      //  cGlobalSettings.MediaFilePathToFileId = new ConcurrentDictionary<string, int>();
+
+    //        /// Search for files and add in list
+    //        bool bAddingFiles = objSystemScanHelper.StartScan(inputToScan, searchPatterns, searchOption, ref list, callback, PauseCounter, OnScanProgressProcess);
+
+    //        /// Adding files complete.
+    //        /// Group by files size and start computing there hash values.
+    //        /// 
+    //        if (list.Count <= 0)
+    //            return true;
+
+    //        ConcurrentDictionary<int, csImageFileInfo> dictRecords = new ConcurrentDictionary<int, csImageFileInfo>();
+
+    //        int nKey = 0;
+    //        foreach (csImageFileInfo record in list)
+    //        {
+    //            nKey += 1;
+    //           // record.Key = nKey;
+    //            dictRecords.TryAdd(nKey, record);
+    //        }
+
+    //       var groupSize = list.GroupBy(p => p.fileSize);
+
+    //        Dictionary<string, List<csImageFileInfo>> dictDupsData = new Dictionary<string, List<csImageFileInfo>>();
+
+    //        int nTotalFilesCount = list.Count;
+    //        int GroupNumber = 0;
+    //        int nFilesProcessed = 0;
+    //        int nTotalDupsFound = 0;
+    //        foreach (var group in groupSize)
+    //        {
+    //            int nItems = group.Count();
+
+    //            if (nItems == 1)
+    //            {
+    //                group.All(p =>
+    //                {
+    //                    p.groupNumber = 0;
+    //                    return true;
+    //                });
+
+    //                nFilesProcessed += 1;
+    //                continue;
+    //            }
+
+    //            int progressCounter = 0;
+    //            group.All(p =>
+    //            {
+    //                p.fileID = AppFunctions.GetMD5(p.filePath);
+    //                nFilesProcessed += 1;
+
+    //                progressCounter++;
+    //                if (progressCounter % 125 == 0)
+    //                {
+    //                    int percentage1 = (nFilesProcessed * 100) / nTotalFilesCount;
+    //                    OnScanProgressProcess(p.filePath, percentage1, nTotalFilesCount, nFilesProcessed, nTotalDupsFound);
+    //                }
+    //                return true;
+    //            });
+
+    //            var dupsGroups = group.GroupBy(p => p.fileID).Where(p => !string.IsNullOrEmpty(p.Key));
+
+    //        string strCurrentFile = "";
+    //        foreach (var dupsGroup in dupsGroups)
+    //        {
+    //            int nDupsCount = dupsGroup.Count();
+
+    //            if (nDupsCount == 1)
+    //                continue;
+
+    //            GroupNumber += 1;
+    //            nTotalDupsFound += nDupsCount;
+    //            dupsGroup.All(p =>
+    //            {
+    //                p.groupNumber = GroupNumber;
+    //                strCurrentFile = p.filePath;
+    //                return true;
+    //            });
+
+    //            dictDupsData.Add(dupsGroup.Key, dupsGroup.ToList<csImageFileInfo>());
+    //        }
+
+    //        if (nFilesProcessed % 125 == 0)
+    //        {
+    //            int percentage = (nFilesProcessed * 100) / list.Count;
+    //            OnScanProgressProcess(strCurrentFile, percentage, list.Count, nFilesProcessed, nTotalDupsFound);
+    //        }
+    //    }
+
+    //        return true;
+
+    //    }
+
+    //}
+#endif
+    }
+    }
+
+
+
+
+
+
+
+

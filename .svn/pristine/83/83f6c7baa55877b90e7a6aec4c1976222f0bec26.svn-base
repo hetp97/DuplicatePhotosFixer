@@ -1,0 +1,390 @@
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using System.Windows.Threading; // ADD THIS
+using DuplicatePhotosFixer.Engine;
+
+namespace DuplicatePhotosFixer.Models
+{
+    public class vmScanProgress : INotifyPropertyChanged // ADD INotifyPropertyChanged
+    {
+        #region properties
+
+        private int _initProgressPercentage { get; set; }
+        public int initProgressPercentage
+        {
+            get { return _initProgressPercentage; }
+            set
+            {
+                _initProgressPercentage = value;
+                OnPropertyChanged("initProgressPercentage");
+                OnPropertyChanged("ProgressText");    
+                OnPropertyChanged("ProgressValue");
+            }
+        }
+
+        private string _txtFilesProcessedCount { get; set; }
+        public string txtFilesProcessedCount
+        {
+            get { return _txtFilesProcessedCount; }
+            set
+            {
+                _txtFilesProcessedCount = value;
+                OnPropertyChanged("txtFilesProcessedCount");
+            }
+        }
+
+        private string _txtFilesDuplicateCount { get; set; }
+        public string txtFilesDuplicateCount
+        {
+            get { return _txtFilesDuplicateCount; }
+            set
+            {
+                _txtFilesDuplicateCount = value;
+                OnPropertyChanged("txtFilesDuplicateCount");
+            }
+        }
+
+        private string _txtCurrentFile { get; set; }
+        public string txtCurrentFile
+        {
+            get { return _txtCurrentFile; }
+            set
+            {
+                _txtCurrentFile = value;
+                OnPropertyChanged("txtCurrentFile");
+            }
+        }
+
+        #endregion
+
+        public event PropertyChangedEventHandler PropertyChanged;
+        public void OnPropertyChanged(string name)
+        {
+            PropertyChangedEventHandler handler = PropertyChanged;
+            if (handler != null)
+            {
+                handler(this, new PropertyChangedEventArgs(name));
+            }
+        }
+
+        public vmScanProgress()
+        {
+            Init();
+        }
+
+        void Init()
+        {
+            //Initialize with default values
+           initProgressPercentage = 0;
+            txtFilesProcessedCount = "0";
+            txtFilesDuplicateCount = "0";
+            txtCurrentFile = "";
+
+
+        }
+
+        public void OnScanStart()
+        {
+            try
+            {
+                cGlobal.TotalDulicateFilesCount = 0;
+                cGlobal.TotalDuplicateFileSize = 0;
+                cGlobal.TotalFileSelectedToDelete = 0;
+                cGlobal.TotalSpaceSelectedToSave = 0;
+
+                initProgressPercentage = 5;
+                txtFilesProcessedCount = "0";
+                txtFilesDuplicateCount = "0";
+                txtCurrentFile = "";
+
+            }
+            catch (Exception ex)
+            {
+                cGlobalSettings.oLogger.WriteLogException("vmScanProgress :: OnScanStart : ", ex);
+            }
+        }
+
+        // Make this thread-safe by dispatching to UI thread
+        public void OnScanProgress(string strMsg, int percentageCompleted, int nTotalFiles, int nTotalProcess, int nTotalDups)
+        {
+            try
+            {
+                // Add debug logging
+                Debug.WriteLine($"Progress Update: {percentageCompleted}% - {strMsg}");
+
+                // Dispatch to UI thread if needed
+                if (System.Windows.Application.Current.Dispatcher.CheckAccess())
+                {
+                    UpdateProgress(strMsg, percentageCompleted, nTotalFiles, nTotalProcess, nTotalDups);
+                }
+                else
+                {
+                    System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                        UpdateProgress(strMsg, percentageCompleted, nTotalFiles, nTotalProcess, nTotalDups));
+                }
+            }
+            catch (Exception ex)
+            {
+                cGlobalSettings.oLogger.WriteLogException("vmScanProgress :: OnScanProgress : ", ex);
+            }
+        }
+#if EnhancedCode
+        /// <summary>
+        /// Enhanced progress update method for MainWindow integration
+        /// </summary>
+        public void UpdateProgressEnhanced(string currentFile, int percentage, int totalFiles, int remainingFiles, int duplicates, string additionalInfo = "")
+        {
+            try
+            {
+                // Thread-safe UI updates
+                if (System.Windows.Application.Current.Dispatcher.CheckAccess())
+                {
+                    DoUpdateProgress(currentFile, percentage, totalFiles, remainingFiles, duplicates, additionalInfo);
+                }
+                else
+                {
+                    System.Windows.Application.Current.Dispatcher.BeginInvoke(
+    new Action(() =>
+    {
+        DoUpdateProgress(currentFile, percentage, totalFiles, remainingFiles, duplicates, additionalInfo);
+    })
+);
+                }
+            }
+            catch (Exception ex)
+            {
+                cGlobalSettings.oLogger.WriteLogException("UpdateProgressEnhanced", ex);
+            }
+        }
+
+        private void DoUpdateProgress(string currentFile, int percentage, int totalFiles, int remainingFiles, int duplicates, string additionalInfo)
+        {
+            try
+            {
+                // Update current file with truncation
+                if (!string.IsNullOrEmpty(currentFile))
+                {
+                    txtCurrentFile = TruncateFilePath(currentFile);
+                }
+
+                // Update progress percentage
+                if (percentage >= 0 && percentage <= 100)
+                {
+                    initProgressPercentage = percentage;
+                }
+
+                // Update remaining files count
+                if (remainingFiles >= 0)
+                {
+                    txtFilesProcessedCount = remainingFiles.ToString("N0");
+                }
+
+                // Update duplicate count with better formatting
+                if (duplicates > 0)
+                {
+                    // Try to get size information
+                    if (cGlobal.TotalDuplicateFileSize > 0)
+                    {
+                        txtFilesDuplicateCount = FormatFileSize(cGlobal.TotalDuplicateFileSize);
+                    }
+                    else
+                    {
+                        txtFilesDuplicateCount = $"{duplicates} files";
+                    }
+                }
+
+                // Update scanning status based on additional info or percentage
+                UpdateScanningStatus(percentage, additionalInfo);
+
+            }
+            catch (Exception ex)
+            {
+                cGlobalSettings.oLogger.WriteLogException("DoUpdateProgress", ex);
+            }
+        }
+
+        /// <summary>
+        /// Update scanning status text based on progress and additional info
+        /// </summary>
+        private void UpdateScanningStatus(int percentage, string additionalInfo = "")
+        {
+            try
+            {
+                // Check additional info first
+                if (!string.IsNullOrEmpty(additionalInfo))
+                {
+                    if (additionalInfo.ToLower().Contains("compar"))
+                        ScanningStatusText = "Comparing";
+                    else if (additionalInfo.ToLower().Contains("analyz"))
+                        ScanningStatusText = "Analyzing";
+                    else if (additionalInfo.ToLower().Contains("final"))
+                        ScanningStatusText = "Finalizing";
+                    else if (additionalInfo.ToLower().Contains("complete"))
+                        ScanningStatusText = "Complete";
+                    return;
+                }
+
+                // Fallback to percentage-based status
+                if (percentage < 10)
+                    ScanningStatusText = "Initializing";
+                else if (percentage < 30)
+                    ScanningStatusText = "Scanning";
+                else if (percentage < 70)
+                    ScanningStatusText = "Comparing";
+                else if (percentage < 95)
+                    ScanningStatusText = "Analyzing";
+                else if (percentage < 100)
+                    ScanningStatusText = "Finalizing";
+                else
+                    ScanningStatusText = "Complete";
+            }
+            catch (Exception ex)
+            {
+                cGlobalSettings.oLogger.WriteLogException("UpdateScanningStatus", ex);
+            }
+        }
+
+        /// <summary>
+        /// Truncate file path for better display
+        /// </summary>
+        private string TruncateFilePath(string filePath)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(filePath))
+                    return "";
+
+                const int maxLength = 60;
+                if (filePath.Length <= maxLength)
+                    return filePath;
+
+                // Keep beginning and end, truncate middle
+                int startLength = maxLength / 2 - 2;
+                int endLength = maxLength / 2 - 2;
+
+                return filePath.Substring(0, startLength) + "..." +
+                       filePath.Substring(filePath.Length - endLength);
+            }
+            catch
+            {
+                return filePath ?? "";
+            }
+        }
+
+        /// <summary>
+        /// Format file size in human-readable format
+        /// </summary>
+        private string FormatFileSize(long sizeInBytes)
+        {
+            try
+            {
+                if (sizeInBytes == 0) return "0 bytes";
+
+                string[] sizes = { "bytes", "KB", "MB", "GB", "TB" };
+                double size = sizeInBytes;
+                int order = 0;
+
+                while (size >= 1024 && order < sizes.Length - 1)
+                {
+                    order++;
+                    size = size / 1024;
+                }
+
+                return $"{size:0.#} {sizes[order]}";
+            }
+            catch
+            {
+                return $"{sizeInBytes} bytes";
+            }
+        }
+
+        // ADD this property if you don't have it already
+        private string _scanningStatusText;
+        public string ScanningStatusText
+        {
+            get { return _scanningStatusText ?? "Scanning"; }
+            set
+            {
+                if (_scanningStatusText != value)
+                {
+                    _scanningStatusText = value;
+                    OnPropertyChanged("ScanningStatusText");
+                }
+            }
+        }
+
+      
+#endif
+
+    public void UpdateProgress(string strMsg, int percentageCompleted, int nTotalFiles, int nTotalProcess, int nTotalDups)
+        {
+            if (!string.IsNullOrEmpty(strMsg))
+            {
+                txtCurrentFile = strMsg;
+            }
+
+            if (nTotalProcess > 0)
+            {
+                txtFilesProcessedCount = nTotalProcess.ToString();
+            }
+
+            if (nTotalDups > 0)
+            {
+                txtFilesDuplicateCount = nTotalDups.ToString();
+            }
+
+            if (percentageCompleted > initProgressPercentage && percentageCompleted <= 100)
+            {
+                initProgressPercentage = percentageCompleted;
+            }
+        }
+
+      
+        public void OnManualScanStop()
+        {
+            try
+            {
+                if (initProgressPercentage >= 99)
+                    return;
+
+                Close_Process();
+            }
+            catch (Exception ex)
+            {
+                cGlobalSettings.oLogger.WriteLogException("vmScanProgress :: OnManualScanStop : ", ex);
+            }
+        }
+
+        void Close_Process()
+        {
+            try
+            {
+                cGlobalSettings.oManualReset.Reset();
+                DialogResult result = DialogResult.No;
+
+                if (cGlobalSettings.b_COMPONENT_INSTALL_STARTED)
+                    App.oMainReference.showMessage(cResourceManager.LoadString("IDS_WIAT_INSTALL_COMPONENT"), "");
+                else
+                    result = App.oMainReference.showYesNoMessage(cResourceManager.LoadString("IDS_STOP_SCAN_DES"));
+
+                cGlobalSettings.oManualReset.Set();
+
+                if (result != DialogResult.Yes)
+                {
+                    return;
+                }
+                cGlobalSettings.abortNow = true;
+            }
+            catch (Exception ex)
+            {
+                cGlobalSettings.oLogger.WriteLogException("vmScanProgress :: Close_Process : ", ex);
+            }
+        }
+    }
+}
